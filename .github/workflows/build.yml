@@ -63,23 +63,40 @@ jobs:
           echo "==> Setting up KernelSU Next..."
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
 
-          # 2. Clone SUSFS4KSU (kernel-4.14 branch)
+          # 2. Inject Manual VFS Hooks (Fixes 'No hooks were defined' error)
+          echo "==> Injecting manual VFS hooks into kernel source..."
+          if [ -f "drivers/kernelsu/kernel/integrate-no-kprobe.py" ]; then
+            python3 drivers/kernelsu/kernel/integrate-no-kprobe.py
+          elif [ -f "KernelSU-Next/kernel/integrate-no-kprobe.py" ]; then
+            python3 KernelSU-Next/kernel/integrate-no-kprobe.py
+          fi
+
+          # 3. Clone SUSFS4KSU (kernel-4.14 branch)
           echo "==> Cloning SUSFS4KSU (kernel-4.14)..."
           cd $GITHUB_WORKSPACE
           git clone -b kernel-4.14 https://gitlab.com/simonpunk/susfs4ksu.git
 
-          # 3. Patch KernelSU Next for SUSFS
-          echo "==> Patching KernelSU Next..."
-          cd $GITHUB_WORKSPACE/kernel/KernelSU-Next
-          patch -p1 < $GITHUB_WORKSPACE/susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch || true
+          # 4. Patch KernelSU Next for SUSFS
+          echo "==> Patching KernelSU Next for SUSFS..."
+          KSU_DIR=""
+          if [ -d "$GITHUB_WORKSPACE/kernel/drivers/kernelsu" ]; then
+            KSU_DIR="$GITHUB_WORKSPACE/kernel/drivers/kernelsu"
+          elif [ -d "$GITHUB_WORKSPACE/kernel/KernelSU-Next" ]; then
+            KSU_DIR="$GITHUB_WORKSPACE/kernel/KernelSU-Next"
+          fi
 
-          # 4. Copy SUSFS core kernel files
+          if [ -n "$KSU_DIR" ]; then
+            cd "$KSU_DIR"
+            patch -p1 < $GITHUB_WORKSPACE/susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch || true
+          fi
+
+          # 5. Copy SUSFS core kernel files
           echo "==> Copying SUSFS source files..."
           cd $GITHUB_WORKSPACE/kernel
           cp $GITHUB_WORKSPACE/susfs4ksu/kernel_patches/fs/susfs.c fs/
           cp $GITHUB_WORKSPACE/susfs4ksu/kernel_patches/include/linux/susfs.h include/linux/
 
-          # 5. Patch Kernel 4.14 Source
+          # 6. Patch Kernel 4.14 Source
           echo "==> Patching Linux 4.14 Source for SUSFS..."
           patch -p1 < $GITHUB_WORKSPACE/susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.14.patch || true
 
@@ -94,11 +111,11 @@ jobs:
           # OverlayFS
           CONFIG_OVERLAY_FS=y
 
-          # KernelSU Next
+          # KernelSU Next Configurations
           CONFIG_KSU=y
           CONFIG_KSU_MANUAL_HOOK=y
 
-          # SUSFS
+          # SUSFS Configurations
           CONFIG_KSU_SUSFS=y
           CONFIG_KSU_SUSFS_SUS_PATH=y
           CONFIG_KSU_SUSFS_SUS_MOUNT=y
@@ -118,6 +135,8 @@ jobs:
           export PATH=$GITHUB_WORKSPACE/toolchain/clang/bin:$GITHUB_WORKSPACE/toolchain/gcc64/bin:$GITHUB_WORKSPACE/toolchain/gcc32/bin:$PATH
           export ARCH=arm64
           export SUBARCH=arm64
+          export KBUILD_HOSTLDFLAGS="-lyaml"
+          export HOSTLDLIBS_dtc="-lyaml"
 
           echo "==> Generating na500 defconfig..."
           make O=out na500_defconfig
@@ -128,15 +147,13 @@ jobs:
             CLANG_TRIPLE=aarch64-linux-gnu- \
             CROSS_COMPILE=aarch64-linux-android- \
             CROSS_COMPILE_ARM32=arm-linux-androideabi- \
-            HOSTLDFLAGS="-lyaml" \
-            HOSTLDLIBS_dtc="-lyaml"
+            NO_YAML=1
 
       - name: Package with AnyKernel3
         run: |
           cd $GITHUB_WORKSPACE
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3 AnyKernel3
           
-          # Copy output binary into AnyKernel3 directory
           if [ -f kernel/out/arch/arm64/boot/Image.gz-dtb ]; then
             cp kernel/out/arch/arm64/boot/Image.gz-dtb AnyKernel3/
           elif [ -f kernel/out/arch/arm64/boot/Image.gz ]; then
@@ -145,7 +162,6 @@ jobs:
             cp kernel/out/arch/arm64/boot/Image AnyKernel3/
           fi
 
-          # Copy DTB/DTBO if generated separately by Unisoc build system
           if [ -f kernel/out/arch/arm64/boot/dtb.img ]; then
             cp kernel/out/arch/arm64/boot/dtb.img AnyKernel3/dtb
           fi
