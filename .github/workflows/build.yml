@@ -22,8 +22,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             build-essential bc bison flex libssl-dev libncurses-dev libelf-dev \
-            libyaml-dev pkg-config dos2unix \
-            ccache zip curl git wget python3 libtinfo5
+            pkg-config dos2unix ccache zip curl git wget python3 libtinfo5
 
       - name: Checkout Kernel Source
         uses: actions/checkout@v4
@@ -32,25 +31,26 @@ jobs:
           ref: master
           path: kernel
 
-      - name: Fix Kconfig Line Endings
+      - name: Fix Kconfig Line Endings & Patch DTC
         run: |
           cd $GITHUB_WORKSPACE/kernel
-          echo "==> Cleaning Windows CRLF line endings in Kconfig files..."
+          echo "==> Cleaning CRLF line endings..."
           find . -name "Kconfig*" -type f -exec dos2unix {} +
+
+          echo "==> Patching scripts/dtc/Makefile to bypass libyaml linker error..."
+          sed -i '/yamltree/d' scripts/dtc/Makefile
 
       - name: Download Toolchains (Clang + GCC)
         run: |
           mkdir -p $GITHUB_WORKSPACE/toolchain
           cd $GITHUB_WORKSPACE/toolchain
 
-          # Android Clang r383902b (Android 11 / 4.14 compatible)
-          echo "Downloading Android Clang..."
+          echo "Downloading Android Clang r383902b..."
           mkdir clang
           wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android11-release/clang-r383902b.tar.gz
           tar -xf clang-r383902b.tar.gz -C clang
           rm clang-r383902b.tar.gz
 
-          # GCC 64-bit & 32-bit Cross-Compilers
           echo "Cloning GCC toolchains..."
           git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 gcc64
           git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9 gcc32
@@ -59,74 +59,37 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/kernel
 
-          # 1. Setup KernelSU Next (Legacy mode for 4.14)
-          echo "==> Setting up KernelSU Next..."
+          # 1. Setup KernelSU Next
+          echo "==> Setting up KernelSU Next (Legacy mode)..."
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
 
-          # 2. Inject Manual VFS Hooks (Fixes 'No hooks were defined' error)
-          echo "==> Injecting manual VFS hooks into kernel source..."
+          # Force driver references in drivers/Kconfig and drivers/Makefile
+          grep -q "kernelsu" drivers/Kconfig || echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
+          grep -q "kernelsu" drivers/Makefile || echo 'obj-y += kernelsu/' >> drivers/Makefile
+
+          # 2. Run VFS non-kprobe hook script if present
           if [ -f "drivers/kernelsu/kernel/integrate-no-kprobe.py" ]; then
             python3 drivers/kernelsu/kernel/integrate-no-kprobe.py
-          elif [ -f "KernelSU-Next/kernel/integrate-no-kprobe.py" ]; then
-            python3 KernelSU-Next/kernel/integrate-no-kprobe.py
           fi
 
-          # 3. Clone SUSFS4KSU (kernel-4.14 branch)
-          echo "==> Cloning SUSFS4KSU (kernel-4.14)..."
+          # 3. Clone SUSFS4KSU (kernel-4.14)
           cd $GITHUB_WORKSPACE
           git clone -b kernel-4.14 https://gitlab.com/simonpunk/susfs4ksu.git
 
           # 4. Patch KernelSU Next for SUSFS
-          echo "==> Patching KernelSU Next for SUSFS..."
-          KSU_DIR=""
-          if [ -d "$GITHUB_WORKSPACE/kernel/drivers/kernelsu" ]; then
-            KSU_DIR="$GITHUB_WORKSPACE/kernel/drivers/kernelsu"
-          elif [ -d "$GITHUB_WORKSPACE/kernel/KernelSU-Next" ]; then
-            KSU_DIR="$GITHUB_WORKSPACE/kernel/KernelSU-Next"
-          fi
-
-          if [ -n "$KSU_DIR" ]; then
+          KSU_DIR="$GITHUB_WORKSPACE/kernel/drivers/kernelsu"
+          if [ -d "$KSU_DIR" ]; then
             cd "$KSU_DIR"
             patch -p1 < $GITHUB_WORKSPACE/susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch || true
           fi
 
           # 5. Copy SUSFS core kernel files
-          echo "==> Copying SUSFS source files..."
           cd $GITHUB_WORKSPACE/kernel
           cp $GITHUB_WORKSPACE/susfs4ksu/kernel_patches/fs/susfs.c fs/
           cp $GITHUB_WORKSPACE/susfs4ksu/kernel_patches/include/linux/susfs.h include/linux/
 
-          # 6. Patch Kernel 4.14 Source
-          echo "==> Patching Linux 4.14 Source for SUSFS..."
+          # 6. Patch Kernel 4.14 Source for SUSFS
           patch -p1 < $GITHUB_WORKSPACE/susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.14.patch || true
-
-      - name: Configure Kernel Defconfig
-        run: |
-          cd $GITHUB_WORKSPACE/kernel
-          DEFCONFIG_PATH="arch/arm64/configs/na500_defconfig"
-
-          echo "==> Appending KernelSU Next & SUSFS flags to na500_defconfig..."
-          cat <<EOT >> $DEFCONFIG_PATH
-
-          # OverlayFS
-          CONFIG_OVERLAY_FS=y
-
-          # KernelSU Next Configurations
-          CONFIG_KSU=y
-          CONFIG_KSU_MANUAL_HOOK=y
-
-          # SUSFS Configurations
-          CONFIG_KSU_SUSFS=y
-          CONFIG_KSU_SUSFS_SUS_PATH=y
-          CONFIG_KSU_SUSFS_SUS_MOUNT=y
-          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT=y
-          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y
-          CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y
-          CONFIG_KSU_SUSFS_TRY_UMOUNT=y
-          CONFIG_KSU_SUSFS_SPOOF_UNAME=y
-          CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
-          CONFIG_KSU_SUSFS_SUS_SU=n
-          EOT
 
       - name: Compile Kernel
         run: |
@@ -135,19 +98,33 @@ jobs:
           export PATH=$GITHUB_WORKSPACE/toolchain/clang/bin:$GITHUB_WORKSPACE/toolchain/gcc64/bin:$GITHUB_WORKSPACE/toolchain/gcc32/bin:$PATH
           export ARCH=arm64
           export SUBARCH=arm64
-          export KBUILD_HOSTLDFLAGS="-lyaml"
-          export HOSTLDLIBS_dtc="-lyaml"
 
-          echo "==> Generating na500 defconfig..."
+          echo "==> Generating defconfig..."
           make O=out na500_defconfig
 
-          echo "==> Starting build..."
+          echo "==> Enforcing KernelSU-Next and SUSFS configs directly on out/.config..."
+          ./scripts/config --file out/.config --enable CONFIG_OVERLAY_FS
+          ./scripts/config --file out/.config --enable CONFIG_KSU
+          ./scripts/config --file out/.config --enable CONFIG_KSU_MANUAL_HOOK
+          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS
+          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_SUS_PATH
+          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_SUS_MOUNT
+          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT
+          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT
+          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_SUS_OVERLAYFS
+          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_TRY_UMOUNT
+          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_SPOOF_UNAME
+          ./scripts/config --file out/.config --enable CONFIG_KSU_SUSFS_OPEN_REDIRECT
+          ./scripts/config --file out/.config --disable CONFIG_KSU_SUSFS_SUS_SU
+
+          make O=out olddefconfig
+
+          echo "==> Starting compilation..."
           make -j$(nproc --all) O=out \
             CC=clang \
             CLANG_TRIPLE=aarch64-linux-gnu- \
             CROSS_COMPILE=aarch64-linux-android- \
-            CROSS_COMPILE_ARM32=arm-linux-androideabi- \
-            NO_YAML=1
+            CROSS_COMPILE_ARM32=arm-linux-androideabi-
 
       - name: Package with AnyKernel3
         run: |
