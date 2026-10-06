@@ -22,6 +22,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             build-essential bc bison flex libssl-dev libncurses-dev libelf-dev \
+            libyaml-dev pkg-config dos2unix \
             ccache zip curl git wget python3 libtinfo5
 
       - name: Checkout Kernel Source
@@ -30,6 +31,12 @@ jobs:
           repository: realme-kernel-opensource/realme_PadMini-AndroidR-kernel-source
           ref: master
           path: kernel
+
+      - name: Fix Kconfig Line Endings
+        run: |
+          cd $GITHUB_WORKSPACE/kernel
+          echo "==> Cleaning Windows CRLF line endings in Kconfig files..."
+          find . -name "Kconfig*" -type f -exec dos2unix {} +
 
       - name: Download Toolchains (Clang + GCC)
         run: |
@@ -81,7 +88,7 @@ jobs:
           cd $GITHUB_WORKSPACE/kernel
           DEFCONFIG_PATH="arch/arm64/configs/na500_defconfig"
 
-          echo "==> Appending KernelSU Next & SUSFS flags to defconfig..."
+          echo "==> Appending KernelSU Next & SUSFS flags to na500_defconfig..."
           cat <<EOT >> $DEFCONFIG_PATH
 
           # OverlayFS
@@ -112,7 +119,7 @@ jobs:
           export ARCH=arm64
           export SUBARCH=arm64
 
-          echo "==> Generating defconfig..."
+          echo "==> Generating na500 defconfig..."
           make O=out na500_defconfig
 
           echo "==> Starting build..."
@@ -120,7 +127,9 @@ jobs:
             CC=clang \
             CLANG_TRIPLE=aarch64-linux-gnu- \
             CROSS_COMPILE=aarch64-linux-android- \
-            CROSS_COMPILE_ARM32=arm-linux-androideabi-
+            CROSS_COMPILE_ARM32=arm-linux-androideabi- \
+            HOSTLDFLAGS="-lyaml" \
+            HOSTLDLIBS_dtc="-lyaml"
 
       - name: Package with AnyKernel3
         run: |
