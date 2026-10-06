@@ -31,14 +31,16 @@ jobs:
           ref: master
           path: kernel
 
-      - name: Fix Kconfig Line Endings & Patch DTC
+      - name: Fix Kconfig & DTC Build Configuration
         run: |
           cd $GITHUB_WORKSPACE/kernel
-          echo "==> Cleaning CRLF line endings..."
+          echo "==> Cleaning CRLF line endings in Kconfig files..."
           find . -name "Kconfig*" -type f -exec dos2unix {} +
 
-          echo "==> Patching scripts/dtc/Makefile to bypass libyaml linker error..."
-          sed -i '/yamltree/d' scripts/dtc/Makefile
+          echo "==> Patching scripts/dtc/Makefile for NO_YAML compilation..."
+          sed -i '/yamltree.o/d' scripts/dtc/Makefile
+          echo "HOSTCFLAGS_dtc.o += -DNO_YAML" >> scripts/dtc/Makefile
+          echo "HOSTCFLAGS_dtc-lexer.lex.o += -DNO_YAML" >> scripts/dtc/Makefile
 
       - name: Download Toolchains (Clang + GCC)
         run: |
@@ -63,12 +65,14 @@ jobs:
           echo "==> Setting up KernelSU Next (Legacy mode)..."
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
 
-          # Force driver references in drivers/Kconfig and drivers/Makefile
           grep -q "kernelsu" drivers/Kconfig || echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
           grep -q "kernelsu" drivers/Makefile || echo 'obj-y += kernelsu/' >> drivers/Makefile
 
-          # 2. Run VFS non-kprobe hook script if present
-          if [ -f "drivers/kernelsu/kernel/integrate-no-kprobe.py" ]; then
+          # 2. Inject VFS hooks for 4.14 non-kprobe kernel
+          echo "==> Injecting manual VFS hooks..."
+          if [ -f "drivers/kernelsu/integrate-no-kprobe.py" ]; then
+            python3 drivers/kernelsu/integrate-no-kprobe.py
+          elif [ -f "drivers/kernelsu/kernel/integrate-no-kprobe.py" ]; then
             python3 drivers/kernelsu/kernel/integrate-no-kprobe.py
           fi
 
@@ -76,11 +80,13 @@ jobs:
           cd $GITHUB_WORKSPACE
           git clone -b kernel-4.14 https://gitlab.com/simonpunk/susfs4ksu.git
 
-          # 4. Patch KernelSU Next for SUSFS
+          # 4. Patch KernelSU Next for SUSFS (Non-interactive)
+          echo "==> Patching KernelSU Next for SUSFS..."
           KSU_DIR="$GITHUB_WORKSPACE/kernel/drivers/kernelsu"
           if [ -d "$KSU_DIR" ]; then
             cd "$KSU_DIR"
-            patch -p1 < $GITHUB_WORKSPACE/susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch || true
+            patch -p1 --forward < $GITHUB_WORKSPACE/susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch || \
+            patch -p2 --forward < $GITHUB_WORKSPACE/susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch || true
           fi
 
           # 5. Copy SUSFS core kernel files
@@ -88,8 +94,9 @@ jobs:
           cp $GITHUB_WORKSPACE/susfs4ksu/kernel_patches/fs/susfs.c fs/
           cp $GITHUB_WORKSPACE/susfs4ksu/kernel_patches/include/linux/susfs.h include/linux/
 
-          # 6. Patch Kernel 4.14 Source for SUSFS
-          patch -p1 < $GITHUB_WORKSPACE/susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.14.patch || true
+          # 6. Patch Kernel 4.14 Source for SUSFS (Non-interactive)
+          echo "==> Patching Kernel 4.14 Source for SUSFS..."
+          patch -p1 --forward < $GITHUB_WORKSPACE/susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.14.patch || true
 
       - name: Compile Kernel
         run: |
@@ -99,10 +106,10 @@ jobs:
           export ARCH=arm64
           export SUBARCH=arm64
 
-          echo "==> Generating defconfig..."
+          echo "==> Generating na500 defconfig..."
           make O=out na500_defconfig
 
-          echo "==> Enforcing KernelSU-Next and SUSFS configs directly on out/.config..."
+          echo "==> Enforcing KernelSU-Next and SUSFS flags in out/.config..."
           ./scripts/config --file out/.config --enable CONFIG_OVERLAY_FS
           ./scripts/config --file out/.config --enable CONFIG_KSU
           ./scripts/config --file out/.config --enable CONFIG_KSU_MANUAL_HOOK
