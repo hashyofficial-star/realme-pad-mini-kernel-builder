@@ -113,7 +113,7 @@ jobs:
           export SUBARCH=arm64
 
           echo "==> Generating defconfig..."
-          make O=out rmp2105_defconfig
+          make O=out na500_defconfig
 
           echo "==> Starting build..."
           make -j$(nproc --all) O=out \
