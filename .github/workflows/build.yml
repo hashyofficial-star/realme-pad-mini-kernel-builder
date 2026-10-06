@@ -1,0 +1,151 @@
+name: Build realme Pad Mini Kernel (KernelSU-Next + SUSFS)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Maximize Build Space
+        uses: easimon/maximize-build-space@v10
+        with:
+          root-reserve-mb: 8192
+          temp-reserve-mb: 2048
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential bc bison flex libssl-dev libncurses-dev libelf-dev \
+            ccache zip curl git wget python3 libtinfo5
+
+      - name: Checkout Kernel Source
+        uses: actions/checkout@v4
+        with:
+          repository: realme-kernel-opensource/realme_PadMini-AndroidR-kernel-source
+          ref: master
+          path: kernel
+
+      - name: Download Toolchains (Clang + GCC)
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/toolchain
+          cd $GITHUB_WORKSPACE/toolchain
+
+          # Android Clang r383902b (Android 11 / 4.14 compatible)
+          echo "Downloading Android Clang..."
+          mkdir clang
+          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android11-release/clang-r383902b.tar.gz
+          tar -xf clang-r383902b.tar.gz -C clang
+          rm clang-r383902b.tar.gz
+
+          # GCC 64-bit & 32-bit Cross-Compilers
+          echo "Cloning GCC toolchains..."
+          git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 gcc64
+          git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9 gcc32
+
+      - name: Integrate KernelSU Next & SUSFS
+        run: |
+          cd $GITHUB_WORKSPACE/kernel
+
+          # 1. Setup KernelSU Next (Legacy mode for 4.14)
+          echo "==> Setting up KernelSU Next..."
+          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
+
+          # 2. Clone SUSFS4KSU (kernel-4.14 branch)
+          echo "==> Cloning SUSFS4KSU (kernel-4.14)..."
+          cd $GITHUB_WORKSPACE
+          git clone -b kernel-4.14 https://gitlab.com/simonpunk/susfs4ksu.git
+
+          # 3. Patch KernelSU Next for SUSFS
+          echo "==> Patching KernelSU Next..."
+          cd $GITHUB_WORKSPACE/kernel/KernelSU-Next
+          patch -p1 < $GITHUB_WORKSPACE/susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch || true
+
+          # 4. Copy SUSFS core kernel files
+          echo "==> Copying SUSFS source files..."
+          cd $GITHUB_WORKSPACE/kernel
+          cp $GITHUB_WORKSPACE/susfs4ksu/kernel_patches/fs/susfs.c fs/
+          cp $GITHUB_WORKSPACE/susfs4ksu/kernel_patches/include/linux/susfs.h include/linux/
+
+          # 5. Patch Kernel 4.14 Source
+          echo "==> Patching Linux 4.14 Source for SUSFS..."
+          patch -p1 < $GITHUB_WORKSPACE/susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.14.patch || true
+
+      - name: Configure Kernel Defconfig
+        run: |
+          cd $GITHUB_WORKSPACE/kernel
+          DEFCONFIG_PATH="arch/arm64/configs/na500_defconfig"
+
+          echo "==> Appending KernelSU Next & SUSFS flags to defconfig..."
+          cat <<EOT >> $DEFCONFIG_PATH
+
+          # OverlayFS
+          CONFIG_OVERLAY_FS=y
+
+          # KernelSU Next
+          CONFIG_KSU=y
+          CONFIG_KSU_MANUAL_HOOK=y
+
+          # SUSFS
+          CONFIG_KSU_SUSFS=y
+          CONFIG_KSU_SUSFS_SUS_PATH=y
+          CONFIG_KSU_SUSFS_SUS_MOUNT=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y
+          CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y
+          CONFIG_KSU_SUSFS_TRY_UMOUNT=y
+          CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+          CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+          CONFIG_KSU_SUSFS_SUS_SU=n
+          EOT
+
+      - name: Compile Kernel
+        run: |
+          cd $GITHUB_WORKSPACE/kernel
+
+          export PATH=$GITHUB_WORKSPACE/toolchain/clang/bin:$GITHUB_WORKSPACE/toolchain/gcc64/bin:$GITHUB_WORKSPACE/toolchain/gcc32/bin:$PATH
+          export ARCH=arm64
+          export SUBARCH=arm64
+
+          echo "==> Generating defconfig..."
+          make O=out rmp2105_defconfig
+
+          echo "==> Starting build..."
+          make -j$(nproc --all) O=out \
+            CC=clang \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-android- \
+            CROSS_COMPILE_ARM32=arm-linux-androideabi-
+
+      - name: Package with AnyKernel3
+        run: |
+          cd $GITHUB_WORKSPACE
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3 AnyKernel3
+          
+          # Copy output binary into AnyKernel3 directory
+          if [ -f kernel/out/arch/arm64/boot/Image.gz-dtb ]; then
+            cp kernel/out/arch/arm64/boot/Image.gz-dtb AnyKernel3/
+          elif [ -f kernel/out/arch/arm64/boot/Image.gz ]; then
+            cp kernel/out/arch/arm64/boot/Image.gz AnyKernel3/
+          elif [ -f kernel/out/arch/arm64/boot/Image ]; then
+            cp kernel/out/arch/arm64/boot/Image AnyKernel3/
+          fi
+
+          # Copy DTB/DTBO if generated separately by Unisoc build system
+          if [ -f kernel/out/arch/arm64/boot/dtb.img ]; then
+            cp kernel/out/arch/arm64/boot/dtb.img AnyKernel3/dtb
+          fi
+
+          cd AnyKernel3
+          zip -r9 ../realme_PadMini-KernelSU-SUSFS.zip * -x .git\* README.md
+
+      - name: Upload Flashable Zip Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: realme_PadMini-KernelSU-SUSFS
+          path: realme_PadMini-KernelSU-SUSFS.zip
